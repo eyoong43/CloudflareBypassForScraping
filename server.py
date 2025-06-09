@@ -6,9 +6,10 @@ import tempfile
 import hashlib
 
 from CloudflareBypasser import CloudflareBypasser
+from models.response import CookieResponse, TurnstileResponse
+from models.request import CloudflareRequest
 from DrissionPage import ChromiumPage, ChromiumOptions
 from fastapi import FastAPI, HTTPException, Response
-from pydantic import BaseModel
 from typing import Dict
 import argparse
 
@@ -18,7 +19,7 @@ import atexit
 
 # Check if running in Docker mode
 DOCKER_MODE = os.getenv("DOCKERMODE", "false").lower() == "true"
-
+CLIENT_ID = None
 SERVER_PORT = int(os.getenv("SERVER_PORT", 8000))
 
 # Chromium options arguments
@@ -42,13 +43,6 @@ arguments = [
 
 browser_path = "/usr/bin/google-chrome"
 app = FastAPI()
-
-
-# Pydantic model for the response
-class CookieResponse(BaseModel):
-    cookies: Dict[str, str]
-    user_agent: str
-
 
 
 def create_proxy_extension(username : str, password : str, endpoint : str, port : str):
@@ -191,13 +185,36 @@ def bypass_cloudflare(url: str, retries: int, log: bool, proxy: str = None) -> C
 
 
 # Endpoint to get cookies
-@app.get("/cookies", response_model=CookieResponse)
-async def get_cookies(url: str, retries: int = 5, proxy: str = None):
+@app.post("/cookies")
+async def get_cookies(request: CloudflareRequest):
+    data = request.model_dump()
+    url = data.pop("url", None)
+    request_client_id = data.pop("client_key", None)
+
+    if not request_client_id or request_client_id != CLIENT_ID:
+        raise HTTPException(status_code=403, detail="Invalid or missing client key")
+    
     if not is_safe_url(url):
         raise HTTPException(status_code=400, detail="Invalid URL")
     try:
+        retries = data.pop("retries", 5)
+        proxy = data.pop("proxy", None)
+
         driver = bypass_cloudflare(url, retries, log, proxy)
-        cookies = {cookie.get("name", ""): cookie.get("value", " ") for cookie in driver.cookies()}
+        cookies = {}
+        for cookie in driver.cookies(all_domains=True, all_info=True):
+            name = cookie.get("name", "")
+            value = cookie.get("value", "")
+            if name and value:
+                cookies[name] = {
+                    "value": value,
+                    "path": cookie.get("path", "/"),
+                    "secure": cookie.get("secure", False),
+                    "domain": cookie.get("domain", ""),
+                    "httpOnly": cookie.get("httpOnly", False),
+                    "expires": cookie.get("expiry", None)
+                }
+                
         user_agent = driver.user_agent
         driver.quit()
         return CookieResponse(cookies=cookies, user_agent=user_agent)
@@ -206,14 +223,36 @@ async def get_cookies(url: str, retries: int = 5, proxy: str = None):
 
 
 # Endpoint to get HTML content and cookies
-@app.get("/html")
-async def get_html(url: str, retries: int = 5, proxy: str = None):
+@app.post("/html")
+async def get_html(request: CloudflareRequest):
+    data = request.model_dump()
+    url = data.pop("url", None)
+    request_client_id = data.pop("client_key", None)
+
+    if not request_client_id or request_client_id != CLIENT_ID:
+        raise HTTPException(status_code=403, detail="Invalid or missing client key")
+    
     if not is_safe_url(url):
         raise HTTPException(status_code=400, detail="Invalid URL")
     try:
+        retries = data.pop("retries", 5)
+        proxy = data.pop("proxy", None)
+
         driver = bypass_cloudflare(url, retries, log, proxy)
         html = driver.html
-        cookies_json = {cookie.get("name", ""): cookie.get("value", " ") for cookie in driver.cookies()}
+        cookies = {}
+        for cookie in driver.cookies(all_domains=True, all_info=True):
+            name = cookie.get("name", "")
+            value = cookie.get("value", "")
+            if name and value:
+                cookies[name] = {
+                    "value": value,
+                    "path": cookie.get("path", "/"),
+                    "secure": cookie.get("secure", False),
+                    "domain": cookie.get("domain", ""),
+                    "httpOnly": cookie.get("httpOnly", False),
+                    "expires": cookie.get("expiry", None)
+                }
         response = Response(content=html, media_type="text/html")
         response.headers["cookies"] = json.dumps(cookies_json)
         response.headers["user_agent"] = driver.user_agent
@@ -223,15 +262,72 @@ async def get_html(url: str, retries: int = 5, proxy: str = None):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/turnstile")
+async def turnstile(request: CloudflareRequest):
+    data = request.model_dump()
+    request_client_id = data.pop("client_key", None)
+
+    if not request_client_id or request_client_id != CLIENT_ID:
+        raise HTTPException(status_code=403, detail="Invalid or missing client key")
+    
+    url = data.pop("url", None)
+    
+    if not is_safe_url(url):
+        raise HTTPException(status_code=400, detail="Invalid URL")
+    try:
+        retries = data.pop("retries", 5)
+        proxy = data.pop("proxy", None)
+        site_key = data.pop("site_key", None)
+        if not site_key:
+            raise HTTPException(status_code=400, detail="site_key is required for Turnstile tasks")
+        
+        driver = bypass_cloudflare(url, retries, log, proxy)
+        try_count = 0
+        response = None
+        while self.driver:
+            if 0 < cf_bypasser.max_retries + 1 <= try_count:
+                logger.info("Exceeded maximum retries. Bypass failed.")
+                response = None
+                error = "Timeout to solve the turnstile, please retry later."
+                break
+            if (datetime.now() - start_time).total_seconds() > timeout:
+                logger.info("Exceeded maximum time. Bypass failed.")
+                response = None
+                error = "Timeout to solve the turnstile, please retry later."
+                break
+            logger.debug(f"Attempt {try_count + 1}: Trying to click turnstile...")
+            cf_bypasser.click_verification_button()
+            for _ in range(100):
+                token = self.addon.result
+                if token:
+                    break
+                else:
+                    time.sleep(0.1)
+            if token:
+                response = TurnstileResponse(token=token)
+                break
+            try_count += 1
+            time.sleep(2)
+        
+        driver.quit()
+        if response is None:
+            raise HTTPException(status_code=500, detail=error)
+
+        return response
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 # Main entry point
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Cloudflare bypass api")
 
     parser.add_argument("--nolog", action="store_true", help="Disable logging")
     parser.add_argument("--headless", action="store_true", help="Run in headless mode")
-
+    parser.add_argument("-K", "--clientKey", required=True, help="Client API key")
+    
     args = parser.parse_args()
     display = None
+    CLIENT_ID = args.clientKey
     
     if args.headless or DOCKER_MODE:
         display = Display(visible=0, size=(1920, 1080))

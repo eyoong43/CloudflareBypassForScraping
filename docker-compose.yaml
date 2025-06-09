@@ -1,0 +1,23 @@
+services:
+  cfbps:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cfbps
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.cfbps.rule=Host(`cfbs.prod.codifybites.com`)"
+      - "traefik.http.routers.cfbps.entrypoints=websecure,web"
+      - "traefik.http.routers.cfbps.tls=true"
+      - "traefik.http.routers.cfbps.tls.certresolver=cloudflare"
+      - "traefik.http.services.cfbps.loadbalancer.server.port=8000"
+    restart: unless-stopped
+    command: ["-K", "${CLIENT_KEY}", "--headless"]
+    env_file:
+      - .env
+    networks:
+      - frontend
+
+networks:
+  frontend:
+    external: true
